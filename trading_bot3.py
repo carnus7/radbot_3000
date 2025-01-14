@@ -240,6 +240,33 @@ def insert_trade_db(symbol, side, quantity, price, total_cost):
     )
     conn.commit()
 
+def fetch_symbol_min_max(symbol):
+    try:
+        info = client.get_symbol_info(symbol)
+        for f in info["filters"]:
+            if f["filterType"] == "LOT_SIZE":
+                return (float(f["minQty"]), float(f["maxQty"]), float(f["stepSize"]))
+    except:
+        pass
+    return (0.000001, 9999999, 0.000001)
+
+def fetch_symbol_min_notional(symbol):
+    """Fetch the minimum notional value for a given symbol."""
+    try:
+        info = client.get_symbol_info(symbol)
+        for f in info["filters"]:
+            if f["filterType"] == "MIN_NOTIONAL":
+                return float(f["minNotional"])
+    except Exception as e:
+        log_message(f"Error fetching MIN_NOTIONAL for {symbol}: {e}")
+    return 10.0  # Default fallback value
+
+def round_step_size(quantity, stepSize):
+    if stepSize <= 0:
+        return quantity
+    precision = int(round(-math.log10(stepSize), 0))
+    return round(quantity, precision)
+
 def fetch_data_for_strategy(symbol, interval, lookback=50):
     try:
         klines = client.get_klines(symbol=symbol, interval=interval, limit=lookback)
@@ -266,18 +293,35 @@ def fetch_data_for_strategy(symbol, interval, lookback=50):
 
 def execute_buy(symbol, spend):
     global trade_capital
+    
+    minQty, maxQty, stepSize = fetch_symbol_min_max(symbol)
+    minNotional = fetch_symbol_min_notional(symbol)
+    price = get_current_price(symbol)
+
+    if spend < minNotional:
+        log_message_ui(f"Trade amount ${spend:.2f} is below the minimum notional ${minNotional:.2f}. Set to minimal notional.")
+        spend = minNotional
 
     # Check if we have enough local capital
     if spend > trade_capital:
         log_message_ui(f"Cannot buy {symbol}, spend= {spend:.2f} > trade_capital= {trade_capital:.2f}.")
         return
 
-    price = get_current_price(symbol)
+    
+
     if price <= 0:
         log_message_ui(f"Invalid price for {symbol}.")
         return
 
     quantity = spend / price
+    quantity = round_step_size(quantity, stepSize)
+
+    if quantity < minQty:
+        log_message_ui(f"quantity {quantity} < minQty {minQty}, abort BUY {symbol}")
+        return
+    if quantity > maxQty:
+        quantity = maxQty
+
     # For brevity, ignoring minQty, etc. but can do similarly as your code
     try:
         order = client.create_order(
@@ -399,6 +443,24 @@ def update_wallet_display():
     set_value("trade_capital_text", f"Trade Money: ${trade_capital:.2f}")
     set_value("profit_text", f"Profit: {profit_pct:.2f}%")
     set_value("total_asset", f"Assets: ${total_value:.2f}")
+
+def color_line(side, quantity_usd_str):
+    if side == "BUY":
+        return f"[RED]{quantity_usd_str}[/RED]"
+    else:
+        return f"[GREEN]{quantity_usd_str}[/GREEN]"
+
+def add_coin_trade_history(symbol, side, quantity, price, total_usd):
+    """Log a buy/sell event with color-coded USDT cost or revenue."""
+    history_tag = f"{symbol}_history_multiline"
+    old_text = get_value(history_tag)
+    timestamp_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    quantity_usd_str = f"${total_usd:.2f}"
+    color_str = color_line(side, quantity_usd_str)
+
+    new_line = f"{timestamp_str} - {side} {quantity:.6f} @ {price:.6f} - {color_str}\n"
+    set_value(history_tag, old_text + new_line)
 
 def update_coin_tab(symbol):
     """Update the displayed quantity, price, stop-loss, and update the line plot data."""
@@ -598,16 +660,16 @@ def toggle_strategy_decisions(sender, data):
 
 def setup_ui():
     create_context()
-    create_viewport(title=BOT_NAME, width=1500, height=900)
+    create_viewport(title=BOT_NAME, width=1280, height=720)
 
-    with window(label=BOT_NAME, width=1500, height=900):
+    with window(label=BOT_NAME, width=1280, height=720):
 
-        # Menu bar for toggles
-        with menu_bar():
-            with menu(label="Options"):
-                add_menu_item(label="Show/Hide Strategy Decisions", callback=toggle_strategy_decisions)
+        # # Menu bar for toggles
+        # with menu_bar():
+        #     with menu(label="Options"):
+        #         add_menu_item(label="Show/Hide Strategy Decisions", callback=toggle_strategy_decisions)
 
-        add_text(f"{BOT_NAME} - Ignores Testnet Stash, Tracks Only Bot-Owned Coins", color=[255, 255, 0])
+        add_text(f"{BOT_NAME} - Version 3 gives u BROKE POWER", color=[255, 255, 0])
         add_separator()
 
         # Layout:
@@ -615,7 +677,7 @@ def setup_ui():
         #  then config
         #  then logs, coin tabs
 
-        with child_window(tag="wallet_child", width=350, height=200, border=True):
+        with child_window(tag="wallet_child", width=400, height=270, border=True):
             add_text("Wallet & Bot Profit", color=[0, 255, 255])
             add_text("Binance USDT (Testnet): $0.00", tag="wallet_balance_text")
             add_text("Trade Money: $0.00", tag="trade_capital_text")
@@ -627,13 +689,13 @@ def setup_ui():
                 tag="wallet_assets_text",
                 multiline=True,
                 default_value="No purchased assets.",
-                width=330,
+                width=380,
                 height=100,
                 readonly=True
             )
 
         # Config
-        with child_window(tag="config_child", width=350, height=250, border=True, pos=(350, 0)):
+        with child_window(tag="config_child", width=380, height=270, border=True, pos=(410, 55)):
             add_text("Trading Configuration", color=[0, 255, 0])
 
             add_input_text(label="Binance Interval", default_value="1m", tag="interval_input", width=200)
@@ -656,7 +718,7 @@ def setup_ui():
             add_button(label="Stop Trading", callback=lambda s,a: stop_trading_thread())
 
         # Strategy Fine-tuning
-        with child_window(tag="strategy_tune_child", width=350, height=200, border=True, pos=(350, 250)):
+        with child_window(tag="strategy_tune_child", width=350, height=270, border=True, pos=(800, 55)):
             add_text("Strategy Fine-Tune Params", color=[255, 128, 0])
 
             add_text("RSI Params:")
@@ -665,20 +727,20 @@ def setup_ui():
             add_input_text(label="Oversold", default_value="30", tag="rsi_oversold_input", width=60)
 
         # coin tabs + logs in the rest
-        with child_window(tag="coin_tabs_child", width=900, height=400, border=True, pos=(700, 0)):
+        with child_window(tag="coin_tabs_child", width=640, height=400, border=True, pos=(8, 328)):
             add_text("Coin Tabs (Ignoring Testnet Stash)", color=[255, 255, 0])
             with tab_bar(tag="coin_tab_bar"):
                 pass
 
         # Logs
-        with child_window(tag="logs_child", width=900, height=200, border=True, pos=(700, 400)):
+        with child_window(tag="logs_child", width=620, height=400, border=True, pos=(656, 328)):
             add_text("Logs", color=[255, 0, 255])
             add_input_text(
                 tag="log_multiline",
                 multiline=True,
                 default_value="--- Logs ---",
-                width=880,
-                height=180,
+                width=600,
+                height=360,
                 readonly=True
             )
 
